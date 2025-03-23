@@ -19,7 +19,6 @@ spec:
     spec:
       containers:
       - name: app
-        #  Замените на образ вашего приложения!
         image: your-docker-registry/your-app-image:latest
         # ------------------------------------------
         # Ресурсы: Управление лимитами
