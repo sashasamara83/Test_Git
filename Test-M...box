@@ -1,0 +1,134 @@
+# ========================================================
+# Deployment: Основная конфигурация приложения
+# ========================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  labels:
+    app: app
+spec:
+  replicas: 3  # Стартовое количество подов (1 под на зону)
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+      - name: app
+        #  Замените на образ вашего приложения!
+        image: your-docker-registry/your-app-image:latest
+        # ------------------------------------------
+        # Ресурсы: Управление лимитами
+        # ------------------------------------------
+        resources:
+          requests:
+            cpu: "0.3"    # 1. Резервируем 0.3 CPU для:
+                           # - Начального всплеска (5-10 сек)
+                           # - Гарантии доступности ресурсов
+            memory: "128Mi" # Фиксированное потребление памяти
+          limits:
+            cpu: "0.5"     # Максимальный лимит
+            memory: "128Mi" # Жёсткий лимит памяти
+            
+        # ------------------------------------------
+        # Readiness Probe: Контроль готовности пода
+        # ------------------------------------------
+        readinessProbe:
+          httpGet:
+            path: /health  # Эндпоинт проверки здоровья
+            port: 8080
+          initialDelaySeconds: 10  # Даём 10 сек на инициализацию
+          periodSeconds: 5         # Проверка каждые 5 сек
+
+      # ========================================================
+      # Распределение подов: стратегия anti-affinity и зональное распределение
+      # ========================================================
+      affinity:
+        podAntiAffinity:
+          # Предпочитать размещение на разных нодах
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100  # Высокий приоритет этого правила
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: app
+              topologyKey: kubernetes.io/hostname  # Разные ноды
+
+      topologySpreadConstraints:
+      - maxSkew: 1  # Максимальная разница подов между зонами = 1
+        topologyKey: topology.kubernetes.io/zone  # Критерий зональности
+        whenUnsatisfiable: ScheduleAnyway  # Размещать даже при неидеальном распределении
+        labelSelector:
+          matchLabels:
+            app: app
+
+# ========================================================
+# Horizontal Pod Autoscaler (HPA): Автомасштабирование по CPU
+# ========================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: app  # ЦЕЛЬ МАСШТАБИРОВАНИЯ - ИМЯ DEPLOYMENT!
+  minReplicas: 3    # Минимум: 1 под на зону (3 зоны)
+  maxReplicas: 10   # Максимум на случай экстремальной нагрузки
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70  # 70% от request (0.3 * 0.7 = 0.21 CPU)
+                                # Учитывает периодические всплески
+
+# ========================================================
+# Pod Disruption Budget (PDB): Защита от плановых простоев
+# ========================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app-pdb
+spec:
+  minAvailable: 3  # Всегда должно быть доступно ≥3 подов
+                   # Соответствует количеству зон (3)
+  selector:
+    matchLabels:
+      app: app
+
+# ========================================================
+# Необходима установка KEDA для CronHPA
+# Cron Horizontal Pod Autoscaler (KEDA): Расписание масштабирования
+# ========================================================
+apiVersion: autoscaling.keda.sh/v1alpha1
+kind: CronHorizontalPodAutoscaler
+metadata:
+  name: app-cronhpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: app
+  schedules:
+  # Дневное расписание (пиковая нагрузка)
+  - name: "daytime"
+    description: "Пиковое время с 08:00 до 22:00 по Москве"
+    timezone: "Europe/Moscow"
+    start: "0 8 * * 1-5"  # Понедельник-Пятница в 08:00
+    end: "0 22 * * 1-5"   # Понедельник-Пятница в 22:00
+    minReplicas: 4         # Минимум 4 пода днём
+    
+  # Ночное расписание (низкая нагрузка)
+  - name: "night"
+    description: "Ночное время с 22:00 до 08:00"
+    timezone: "Europe/Moscow"
+    start: "0 22 * * *"   # Ежедневно в 22:00
+    end: "0 8 * * *"       # Ежедневно в 08:00
+    minReplicas: 3         # Возврат к базовому минимуму
